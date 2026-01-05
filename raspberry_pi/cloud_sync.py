@@ -46,17 +46,18 @@ class Config:
     LOCAL_TOPIC = "agrisense/sensors/data"
     
     # Cloud MQTT Broker (OpenStack)
-    CLOUD_BROKER = "51.107.8.227"  # Your OpenStack server IP
+    CLOUD_BROKER = "172.22.249.96"  # Your OpenStack server IP
     CLOUD_PORT = 1883
     CLOUD_TOPIC = "agrisense/sensors/data"
     CLOUD_ALARMS_TOPIC = "agrisense/alarms"
     
     # Sync settings
-    BATCH_SIZE = 10           # Number of readings to batch before sending
-    BATCH_TIMEOUT = 30        # Send batch after this many seconds even if not full
+    REALTIME_MODE = True      # Send data immediately (True) or use batching (False)
+    BATCH_SIZE = 1            # Number of readings to batch before sending (1 for real-time)
+    BATCH_TIMEOUT = 2         # Send batch after this many seconds even if not full
     RETRY_INTERVAL = 5        # Seconds between reconnection attempts
     OFFLINE_DB = "offline_queue.db"
-    
+
     # Edge identity
     EDGE_ID = "edge-rpi-001"
     EDGE_NAME = "AgriSense Gateway"
@@ -210,21 +211,25 @@ class CloudSyncService:
     def start(self):
         """Start the sync service"""
         self.running = True
-        
+
         # Setup local MQTT client
         self._setup_local_client()
-        
+
         # Setup cloud MQTT client
         self._setup_cloud_client()
-        
+
         # Start batch sender thread
         batch_thread = Thread(target=self._batch_sender_loop, daemon=True)
         batch_thread.start()
-        
+
         # Start offline queue processor thread
         queue_thread = Thread(target=self._offline_queue_processor, daemon=True)
         queue_thread.start()
-        
+
+        # Start statistics reporter thread
+        stats_thread = Thread(target=self._stats_reporter_loop, daemon=True)
+        stats_thread.start()
+
         logger.info("Cloud sync service started")
         logger.info(f"  Local broker: {self.config.LOCAL_BROKER}:{self.config.LOCAL_PORT}")
         logger.info(f"  Cloud broker: {self.config.CLOUD_BROKER}:{self.config.CLOUD_PORT}")
@@ -272,10 +277,12 @@ class CloudSyncService:
             if rc == 0:
                 self.local_connected = True
                 logger.info("Connected to local MQTT broker")
-                # Subscribe to sensor data
+                # Subscribe to ALL sensor data from ESP32 (via BLE gateway)
                 client.subscribe(self.config.LOCAL_TOPIC)
+                logger.info(f"  Subscribed to: {self.config.LOCAL_TOPIC} (ESP32 sensor data)")
                 # Also subscribe to alarms to forward them
                 client.subscribe("agrisense/alarms")
+                logger.info(f"  Subscribed to: agrisense/alarms (Node-RED alarms)")
             else:
                 logger.error(f"Local MQTT connection failed: {rc}")
         
@@ -318,25 +325,47 @@ class CloudSyncService:
     def _handle_local_message(self, msg):
         """Handle message from local MQTT broker"""
         try:
+            # Receive COMPLETE sensor payload from ESP32 (via BLE gateway)
+            # Contains: node_id, location, temperature, humidity,
+            #           light, light_raw, soil, soil_raw, air_quality, air_raw
             payload = json.loads(msg.payload.decode())
             self.stats['readings_received'] += 1
-            
-            # Add metadata
+
+            # Add edge metadata (preserves ALL original sensor fields)
             payload['edge_id'] = self.config.EDGE_ID
             payload['edge_name'] = self.config.EDGE_NAME
             payload['edge_location'] = self.config.EDGE_LOCATION
             payload['received_at'] = datetime.now().isoformat()
-            
+
             if msg.topic == "agrisense/alarms":
-                # Forward alarms immediately
-                self._send_to_cloud(self.config.CLOUD_ALARMS_TOPIC, payload)
+                # Forward alarms immediately (always real-time)
+                success = self._send_to_cloud(self.config.CLOUD_ALARMS_TOPIC, payload)
+                if success:
+                    logger.warning(f"ALARM sent to cloud: {payload.get('violations', 'unknown')}")
+                else:
+                    logger.error(f"ALARM queued (cloud offline): {payload.get('violations', 'unknown')}")
             else:
-                # Add sensor data to batch
-                with self.batch_lock:
-                    self.batch_buffer.append(payload)
-                
-                logger.debug(f"Buffered reading from {payload.get('node_id', 'unknown')}")
-                
+                # In real-time mode, send immediately; otherwise batch
+                if self.config.REALTIME_MODE:
+                    # Send ALL sensor data immediately to cloud (no filtering)
+                    success = self._send_to_cloud(self.config.CLOUD_TOPIC, payload)
+                    if success:
+                        logger.info(f"Sent ALL sensor data to cloud from {payload.get('node_id', 'unknown')}:")
+                        logger.info(f"    Temp: {payload.get('temperature', 'N/A')}°C, "
+                                   f"Humidity: {payload.get('humidity', 'N/A')}%")
+                        logger.info(f"    Light: {payload.get('light', 'N/A')}% (raw: {payload.get('light_raw', 'N/A')}), "
+                                   f"Soil: {payload.get('soil', 'N/A')}% (raw: {payload.get('soil_raw', 'N/A')})")
+                        logger.info(f"    Air Quality: {payload.get('air_quality', 'N/A')} (raw: {payload.get('air_raw', 'N/A')})")
+                    else:
+                        logger.warning(f"Queued (cloud offline): {payload.get('node_id', 'unknown')} - "
+                                      f"Queue size: {self.offline_queue.get_count()}")
+                else:
+                    # Add sensor data to batch
+                    with self.batch_lock:
+                        self.batch_buffer.append(payload)
+
+                    logger.debug(f"Buffered reading from {payload.get('node_id', 'unknown')}")
+
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON from local broker: {e}")
         except Exception as e:
@@ -359,18 +388,26 @@ class CloudSyncService:
             logger.error(f"Error handling cloud message: {e}")
     
     def _send_to_cloud(self, topic: str, payload: dict) -> bool:
-        """Send data to cloud MQTT broker"""
+        """
+        Send COMPLETE sensor data to cloud MQTT broker.
+
+        Sends entire payload with ALL sensor fields (no filtering):
+        - All ESP32 sensor data: temperature, humidity, light, light_raw,
+          soil, soil_raw, air_quality, air_raw, node_id, location
+        - Edge metadata: edge_id, edge_name, edge_location, received_at
+        """
         if not self.cloud_connected:
             # Queue for later
             self.offline_queue.enqueue({'topic': topic, 'payload': payload})
             self.stats['readings_queued'] += 1
             logger.warning("Cloud offline - queued reading")
             return False
-        
+
         try:
+            # Send ENTIRE payload as JSON (all sensor fields included)
             result = self.cloud_client.publish(
                 topic,
-                json.dumps(payload),
+                json.dumps(payload),  # Serializes ALL fields in payload
                 qos=1  # At least once delivery
             )
             
@@ -473,7 +510,25 @@ class CloudSyncService:
             if sent_ids:
                 self.offline_queue.mark_sent(sent_ids)
                 logger.info(f"Cleared {len(sent_ids)} readings from offline queue")
-    
+
+    def _stats_reporter_loop(self):
+        """Periodically report statistics to confirm data is flowing"""
+        report_interval = 60  # Report every 60 seconds
+        while self.running:
+            time.sleep(report_interval)
+
+            if self.stats['readings_received'] > 0 or self.stats['readings_sent'] > 0:
+                queue_size = self.offline_queue.get_count()
+                logger.info(f"=== Data Flow Stats ===")
+                logger.info(f"  Received from ESP32: {self.stats['readings_received']}")
+                logger.info(f"  Sent to cloud: {self.stats['readings_sent']}")
+                logger.info(f"  Queued (offline): {self.stats['readings_queued']}")
+                logger.info(f"  Queue size: {queue_size}")
+                logger.info(f"  Cloud connected: {self.cloud_connected}")
+                if self.stats['readings_received'] > 0:
+                    success_rate = (self.stats['readings_sent'] / self.stats['readings_received']) * 100
+                    logger.info(f"  Success rate: {success_rate:.1f}%")
+
     def get_status(self) -> dict:
         """Get service status"""
         return {
@@ -486,7 +541,10 @@ class CloudSyncService:
             'config': {
                 'edge_id': self.config.EDGE_ID,
                 'local_broker': f"{self.config.LOCAL_BROKER}:{self.config.LOCAL_PORT}",
-                'cloud_broker': f"{self.config.CLOUD_BROKER}:{self.config.CLOUD_PORT}"
+                'cloud_broker': f"{self.config.CLOUD_BROKER}:{self.config.CLOUD_PORT}",
+                'realtime_mode': self.config.REALTIME_MODE,
+                'batch_size': self.config.BATCH_SIZE,
+                'batch_timeout': self.config.BATCH_TIMEOUT
             }
         }
 
@@ -499,9 +557,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python cloud_sync.py                          # Start with default settings
+  python cloud_sync.py                          # Start with default settings (real-time mode)
   python cloud_sync.py --cloud-ip 51.107.8.227  # Specify cloud server IP
   python cloud_sync.py --edge-id greenhouse-01  # Set edge identifier
+  python cloud_sync.py --realtime               # Enable real-time sync (default)
+  python cloud_sync.py --no-realtime --batch-size 10 --batch-timeout 30  # Use batching
   python cloud_sync.py --test                   # Test cloud connection
         """
     )
@@ -520,11 +580,17 @@ Examples:
                         help='Edge gateway name')
     parser.add_argument('--batch-size', type=int, default=Config.BATCH_SIZE,
                         help='Number of readings per batch')
+    parser.add_argument('--batch-timeout', type=int, default=Config.BATCH_TIMEOUT,
+                        help='Send batch after this many seconds')
+    parser.add_argument('--realtime', action='store_true', default=Config.REALTIME_MODE,
+                        help='Enable real-time mode (send data immediately)')
+    parser.add_argument('--no-realtime', dest='realtime', action='store_false',
+                        help='Disable real-time mode (use batching)')
     parser.add_argument('--test', action='store_true',
                         help='Test cloud connection and exit')
-    
+
     args = parser.parse_args()
-    
+
     # Update config
     Config.CLOUD_BROKER = args.cloud_ip
     Config.CLOUD_PORT = args.cloud_port
@@ -533,6 +599,8 @@ Examples:
     Config.EDGE_ID = args.edge_id
     Config.EDGE_NAME = args.edge_name
     Config.BATCH_SIZE = args.batch_size
+    Config.BATCH_TIMEOUT = args.batch_timeout
+    Config.REALTIME_MODE = args.realtime
     
     if args.test:
         # Test cloud connection
@@ -576,16 +644,16 @@ Examples:
                 
                 time.sleep(1)
                 
-                print(f"✓ Connected successfully!")
-                print(f"✓ Test message sent to topic: {Config.CLOUD_TOPIC}")
+                print(f"Connected successfully!")
+                print(f"Test message sent to topic: {Config.CLOUD_TOPIC}")
             else:
-                print(f"✗ Connection failed - check IP and firewall")
+                print(f"Connection failed - check IP and firewall")
             
             test_client.loop_stop()
             test_client.disconnect()
             
         except Exception as e:
-            print(f"✗ Connection error: {e}")
+            print(f"Connection error: {e}")
             print(f"  Check that the server IP is correct and firewall allows port 1883")
         
         return
@@ -598,7 +666,7 @@ Examples:
     print(f"  Edge Name:    {Config.EDGE_NAME}")
     print(f"  Local MQTT:   {Config.LOCAL_BROKER}:{Config.LOCAL_PORT}")
     print(f"  Cloud MQTT:   {Config.CLOUD_BROKER}:{Config.CLOUD_PORT}")
-    print(f"  Batch Size:   {Config.BATCH_SIZE}")
+    print(f"  Sync Mode:    {'REAL-TIME (immediate)' if Config.REALTIME_MODE else f'BATCH (size: {Config.BATCH_SIZE}, timeout: {Config.BATCH_TIMEOUT}s)'}")
     print("=" * 60)
     print("  Press Ctrl+C to stop")
     print("=" * 60)

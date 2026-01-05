@@ -25,7 +25,7 @@
 // ============== CONFIGURATION ==============
 
 // Device Identity - CHANGE FOR EACH NODE
-#define DEVICE_NAME "AgriSense-002"
+#define DEVICE_NAME "AgriSense-001"
 #define LOCATION "Greenhouse-A"
 
 // Pin Definitions
@@ -73,7 +73,7 @@ unsigned long lastReadingTime = 0;
 class ServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
         deviceConnected = true;
-        Serial.println("✓ Client connected");
+        Serial.println("Client connected");
         digitalWrite(LED_PIN, HIGH);
     }
 
@@ -113,9 +113,9 @@ void setup() {
     Serial.print("AHT20 sensor: ");
     if (aht.begin()) {
         ahtFound = true;
-        Serial.println("✓ Found");
+        Serial.println("Found");
     } else {
-        Serial.println("✗ Not found");
+        Serial.println("Not found");
     }
     
     // Initialise BLE
@@ -141,7 +141,7 @@ void setup() {
     pAdvertising->setScanResponse(true);
     BLEDevice::startAdvertising();
     
-    Serial.println("✓ Advertising");
+    Serial.println("Advertising");
     Serial.println("\nWaiting for connection...\n");
 }
 

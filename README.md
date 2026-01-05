@@ -12,10 +12,10 @@ A simplified IoT system for environmental monitoring using ESP32, Raspberry Pi, 
 │ • AHT20 (Temp)  │                │ • ble_gateway   │                 │ • Thresholds    │
 │ • MH-Series     │                │ • cloud_sync    │                 │ • Alerts        │
 │ • Soil Moisture │                │ • MQTT Broker   │                 │                 │
-│ • MQ-135 (Air)  │                │                 │                 │                 │
+│ • MQ-135 (Air)  │                │ • SQLite DB     │                 │                 │
 └─────────────────┘                └────────┬────────┘                 └─────────────────┘
                                            │
-                                           │ MQTT (Async)
+                                           │ MQTT (Real-time)
                                            │
                                            ▼
                                    ┌─────────────────┐
@@ -28,14 +28,6 @@ A simplified IoT system for environmental monitoring using ESP32, Raspberry Pi, 
                                    └─────────────────┘
 ```
 
-## Data Flow
-
-1. **ESP32** reads sensors every 5 seconds
-2. **ESP32** broadcasts data via BLE notification
-3. **ble_gateway.py** receives BLE data, publishes to local MQTT
-4. **Node-RED** subscribes to local MQTT, checks thresholds, generates alarms
-5. **cloud_sync.py** subscribes to local MQTT, forwards to OpenStack MQTT broker
-
 ## Hardware Components
 
 | Component | Model | ESP32 Pin | Notes |
@@ -45,196 +37,217 @@ A simplified IoT system for environmental monitoring using ESP32, Raspberry Pi, 
 | Soil Moisture | Capacitive | GPIO 34 | Analogue, 3.3V |
 | Air Quality | Mikroe-1630 (MQ-135) | GPIO 35 | Analogue, **5V required** |
 
-## Software Components
+---
 
-### 1. ESP32 Firmware (`esp32/agrisense_sensor.ino`)
+## Quick Start
 
-Single Arduino sketch handling all sensors and BLE communication.
-
-**Libraries Required:**
-- Adafruit AHTX0
-- ArduinoJson
-
-**Configuration:**
-```cpp
-#define DEVICE_NAME "AgriSense-001"    // Change for each node
-#define LOCATION "Greenhouse-A"         // Location identifier
-```
-
-### 2. BLE Gateway (`raspberry_pi/ble_gateway.py`)
-
-Receives BLE notifications from ESP32 nodes and publishes to MQTT.
+### 1. Raspberry Pi Setup
 
 ```bash
-# Install dependencies
-pip install bleak paho-mqtt
-
-# Run
-python ble_gateway.py
-```
-
-### 3. Cloud Sync (`raspberry_pi/cloud_sync.py`)
-
-Asynchronous synchronisation between edge and OpenStack cloud via MQTT.
-
-**Features:**
-- Batches readings for efficient transmission
-- Offline queue (SQLite) for network outages
-- Automatic reconnection
-- Bidirectional communication (can receive commands from cloud)
-
-```bash
-# Install dependencies
-pip install paho-mqtt
-
-# Test cloud connection
-python cloud_sync.py --test --cloud-ip YOUR_OPENSTACK_IP
-
-# Run with default settings
-python cloud_sync.py
-
-# Run with custom settings
-python cloud_sync.py --cloud-ip 51.107.8.227 --edge-id greenhouse-01
-```
-
-**Configuration:**
-```python
-# Edit cloud_sync.py or use command line arguments
-CLOUD_BROKER = "51.107.8.227"    # Your OpenStack server IP
-CLOUD_PORT = 1883                 # MQTT port
-EDGE_ID = "edge-rpi-001"          # Unique edge identifier
-```
-
-### 4. Node-RED Alarm Flow (`nodered/alarm_flow.json`)
-
-Threshold-based monitoring with configurable limits.
-
-**Default Thresholds:**
-| Parameter | Min | Max | Unit |
-|-----------|-----|-----|------|
-| Temperature | 15 | 35 | °C |
-| Humidity | 30 | 85 | % |
-| Light | 10 | 90 | % |
-| Soil Moisture | 20 | 80 | % |
-| Air Quality | 0 | 70 | Index |
-
-## Installation
-
-### Raspberry Pi Setup
-
-```bash
-# 1. Install system packages
+# Install system packages
 sudo apt update
-sudo apt install -y bluetooth bluez mosquitto mosquitto-clients nodejs npm
+sudo apt install -y bluetooth bluez mosquitto mosquitto-clients python3-pip sqlite3
 
-# 2. Install Node-RED
-sudo npm install -g node-red
+# Install Python dependencies
+pip3 install bleak paho-mqtt
 
-# 3. Install Python dependencies
-pip install bleak paho-mqtt
+# Enable services
+sudo systemctl enable bluetooth mosquitto
+sudo systemctl start bluetooth mosquitto
 
-# 4. Enable and start Mosquitto
-sudo systemctl enable mosquitto
-sudo systemctl start mosquitto
-
-# 5. Copy project files
+# Create project directory
 mkdir -p ~/agrisense
-# Copy raspberry_pi/*.py to ~/agrisense/
-# Copy nodered/*.json to ~/.node-red/
+cd ~/agrisense
 
-# 6. Import Node-RED flow
-# Open Node-RED (http://localhost:1880)
-# Import alarm_flow.json
+# Copy files: ble_gateway.py and cloud_sync.py to ~/agrisense/
+
+# Configure cloud IP
+nano cloud_sync.py  # Change CLOUD_BROKER to your OpenStack IP
 ```
 
-### ESP32 Setup
+### 2. ESP32 Setup
 
 1. Open Arduino IDE
-2. Install libraries:
-   - Adafruit AHTX0 (Library Manager)
-   - ArduinoJson (Library Manager)
-3. Open `esp32/agrisense_sensor.ino`
+2. Install libraries: `Adafruit AHTX0`, `ArduinoJson`
+3. Open `esp32/agrisense_sensor/agrisense_sensor.ino`
 4. Configure device name and location
 5. Upload to ESP32
 
-### OpenStack Cloud Setup
-
-1. Ensure MQTT broker (Mosquitto) is installed on your OpenStack instance
-2. Open firewall port 1883:
-   ```bash
-   # On OpenStack instance
-   sudo ufw allow 1883
-   ```
-3. Configure Mosquitto for remote connections:
-   ```bash
-   # /etc/mosquitto/mosquitto.conf
-   listener 1883
-   allow_anonymous true
-   ```
-
-## Running the System
-
-### Start Order
-
-1. **Mosquitto** (auto-starts on boot)
-2. **Node-RED**: `node-red`
-3. **BLE Gateway**: `python ble_gateway.py`
-4. **Cloud Sync**: `python cloud_sync.py`
-5. **ESP32**: Power on
-
-### Running as Services
-
-Create systemd services for automatic startup:
+### 3. Run the System
 
 ```bash
-# /etc/systemd/system/agrisense-ble.service
+# Terminal 1 - BLE Gateway
+cd ~/agrisense
+python3 ble_gateway.py
+
+# Terminal 2 - Cloud Sync
+cd ~/agrisense
+python3 cloud_sync.py
+```
+
+**Databases are created automatically** - No manual setup needed!
+- `agrisense_data.db` - Local sensor data
+- `offline_queue.db` - Cloud sync queue
+
+---
+
+## Running as Services (Auto-Start on Boot)
+
+### Create BLE Gateway Service
+
+```bash
+sudo nano /etc/systemd/system/agrisense-ble.service
+```
+
+Paste:
+```ini
 [Unit]
 Description=AgriSense BLE Gateway
 After=bluetooth.target mosquitto.service
 
 [Service]
-ExecStart=/usr/bin/python3 /home/pi/agrisense/ble_gateway.py
-WorkingDirectory=/home/pi/agrisense
-Restart=always
+Type=simple
 User=pi
+WorkingDirectory=/home/pi/agrisense
+ExecStart=/usr/bin/python3 /home/pi/agrisense/ble_gateway.py
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 ```
 
+### Create Cloud Sync Service
+
 ```bash
-# /etc/systemd/system/agrisense-cloud.service
+sudo nano /etc/systemd/system/agrisense-cloud.service
+```
+
+Paste:
+```ini
 [Unit]
 Description=AgriSense Cloud Sync
-After=network.target mosquitto.service
+After=network-online.target mosquitto.service
 
 [Service]
-ExecStart=/usr/bin/python3 /home/pi/agrisense/cloud_sync.py
-WorkingDirectory=/home/pi/agrisense
-Restart=always
+Type=simple
 User=pi
+WorkingDirectory=/home/pi/agrisense
+ExecStart=/usr/bin/python3 /home/pi/agrisense/cloud_sync.py
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable services:
+### Enable and Start Services
+
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable agrisense-ble agrisense-cloud
 sudo systemctl start agrisense-ble agrisense-cloud
+
+# Check status
+sudo systemctl status agrisense-ble
+sudo systemctl status agrisense-cloud
 ```
 
-## MQTT Topics
+---
 
-| Topic | Direction | Description |
-|-------|-----------|-------------|
-| `agrisense/sensors/data` | ESP32 → Cloud | Sensor readings |
-| `agrisense/alarms` | Node-RED → Cloud | Threshold alerts |
-| `agrisense/commands/{edge_id}` | Cloud → Edge | Remote commands |
+## Monitoring & Management
 
-## JSON Payload Format
+### View Logs
 
-### Sensor Reading
+```bash
+# Live logs
+sudo journalctl -u agrisense-ble -f
+sudo journalctl -u agrisense-cloud -f
+
+# Both together
+sudo journalctl -u agrisense-ble -u agrisense-cloud -f
+```
+
+### Monitor MQTT
+
+```bash
+# All topics
+mosquitto_sub -v -t "agrisense/#"
+
+# Sensor data only
+mosquitto_sub -v -t "agrisense/sensors/data"
+```
+
+### Check Database
+
+```bash
+# Count sensor readings
+sqlite3 ~/agrisense/agrisense_data.db "SELECT COUNT(*) FROM sensor_readings;"
+
+# View last 5 readings
+sqlite3 ~/agrisense/agrisense_data.db "SELECT * FROM sensor_readings ORDER BY id DESC LIMIT 5;"
+
+# Check cloud sync queue
+sqlite3 ~/agrisense/offline_queue.db "SELECT COUNT(*) FROM reading_queue WHERE status='pending';"
+```
+
+### Service Commands
+
+```bash
+# Start
+sudo systemctl start agrisense-ble agrisense-cloud
+
+# Stop
+sudo systemctl stop agrisense-ble agrisense-cloud
+
+# Restart
+sudo systemctl restart agrisense-ble agrisense-cloud
+
+# Status
+sudo systemctl status agrisense-ble agrisense-cloud
+```
+
+---
+
+## Configuration
+
+### Cloud Sync (`cloud_sync.py`)
+
+Edit line ~49:
+```python
+CLOUD_BROKER = "172.22.249.96"  # Your OpenStack IP
+CLOUD_PORT = 1883
+REALTIME_MODE = True             # Send data immediately
+BATCH_SIZE = 1                   # Readings per batch
+BATCH_TIMEOUT = 2                # Batch timeout (seconds)
+```
+
+Command-line options:
+```bash
+# Test cloud connection
+python3 cloud_sync.py --test --cloud-ip YOUR_IP
+
+# Custom settings
+python3 cloud_sync.py --cloud-ip 172.22.249.96 --edge-id greenhouse-01
+
+# Use batch mode
+python3 cloud_sync.py --no-realtime --batch-size 10 --batch-timeout 30
+```
+
+### ESP32 Firmware
+
+Edit in `agrisense_sensor.ino`:
+```cpp
+#define DEVICE_NAME "AgriSense-001"    // Change for each node
+#define LOCATION "Greenhouse-A"         // Location identifier
+```
+
+---
+
+## Data Format
+
+### Sensor Reading (MQTT: `agrisense/sensors/data`)
+
 ```json
 {
     "node_id": "AgriSense-001",
@@ -253,55 +266,138 @@ sudo systemctl start agrisense-ble agrisense-cloud
 }
 ```
 
-### Alarm
-```json
-{
-    "node_id": "AgriSense-001",
-    "violations": ["temperature > 35"],
-    "timestamp": "2024-01-15T10:30:00"
-}
-```
+All sensor data is sent to cloud in **real-time** with no filtering.
+
+---
 
 ## Troubleshooting
 
-### BLE Connection Issues
+### ESP32 Not Found
+
 ```bash
-# Check Bluetooth status
+# Check Bluetooth
 sudo systemctl status bluetooth
-sudo hciconfig
-
-# Scan for devices
 sudo hcitool lescan
+
+# Restart Bluetooth
+sudo systemctl restart bluetooth
 ```
 
-### MQTT Issues
-```bash
-# Test local MQTT
-mosquitto_sub -t "agrisense/#" -v
+### Cloud Connection Failed
 
-# Test cloud MQTT
-mosquitto_pub -h YOUR_CLOUD_IP -t "test" -m "hello"
-```
-
-### Cloud Sync Issues
 ```bash
 # Test connection
-python cloud_sync.py --test --cloud-ip YOUR_IP
+python3 cloud_sync.py --test --cloud-ip YOUR_IP
 
-# Check offline queue
-sqlite3 offline_queue.db "SELECT COUNT(*) FROM reading_queue WHERE status='pending'"
+# Check network
+ping YOUR_OPENSTACK_IP
+
+# Check firewall on OpenStack
+sudo ufw allow 1883
 ```
 
-## Files
+### Check Logs for Errors
+
+```bash
+# BLE Gateway logs
+sudo journalctl -u agrisense-ble -n 50
+
+# Cloud Sync logs
+sudo journalctl -u agrisense-cloud -n 50
+```
+
+### Database Issues
+
+```bash
+# Check database exists
+ls -lh ~/agrisense/*.db
+
+# Verify integrity
+sqlite3 ~/agrisense/agrisense_data.db "PRAGMA integrity_check;"
+
+# Rebuild (deletes data)
+rm ~/agrisense/*.db
+sudo systemctl restart agrisense-ble agrisense-cloud
+```
+
+---
+
+## OpenStack Cloud Setup
+
+On your OpenStack instance:
+
+```bash
+# Install MQTT broker
+sudo apt install -y mosquitto mosquitto-clients
+
+# Configure for remote connections
+sudo nano /etc/mosquitto/mosquitto.conf
+```
+
+Add:
+```
+listener 1883
+allow_anonymous true
+```
+
+```bash
+# Open firewall
+sudo ufw allow 1883
+
+# Restart Mosquitto
+sudo systemctl restart mosquitto
+```
+
+---
+
+## Project Files
 
 ```
 agrisense-minimal/
 ├── esp32/
-│   └── agrisense_sensor.ino    # ESP32 firmware (all sensors)
+│   └── agrisense_sensor/
+│       └── agrisense_sensor.ino    # ESP32 firmware
 ├── raspberry_pi/
-│   ├── ble_gateway.py          # BLE to MQTT bridge
-│   └── cloud_sync.py           # MQTT to OpenStack sync
+│   ├── ble_gateway.py              # BLE to MQTT bridge
+│   └── cloud_sync.py               # Cloud sync (real-time)
 ├── nodered/
-│   └── alarm_flow.json         # Threshold monitoring
+│   └── alarm_flow.json             # Threshold monitoring
 └── README.md
 ```
+
+---
+
+## Data Flow
+
+1. **ESP32** reads sensors every 5 seconds
+2. **ESP32** broadcasts via BLE
+3. **ble_gateway.py** receives BLE → saves to SQLite → publishes to MQTT
+4. **cloud_sync.py** subscribes to MQTT → sends to OpenStack (real-time)
+5. If cloud offline → queues in SQLite → auto-retries every 5 seconds
+
+**All sensor data is sent to cloud with zero data loss.**
+
+---
+
+## Quick Reference
+
+```bash
+# Check if running
+sudo systemctl status agrisense-*
+
+# View live logs
+sudo journalctl -u agrisense-ble -u agrisense-cloud -f
+
+# Monitor MQTT
+mosquitto_sub -v -t "agrisense/#"
+
+# Check data count
+sqlite3 ~/agrisense/agrisense_data.db "SELECT COUNT(*) FROM sensor_readings;"
+
+# Test cloud
+python3 cloud_sync.py --test --cloud-ip YOUR_IP
+```
+
+---
+
+**System ready! All sensor data flows from ESP32 → Raspberry Pi → OpenStack Cloud in real-time.**
