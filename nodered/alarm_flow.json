@@ -60,7 +60,7 @@
         "id": "debug-alarm",
         "type": "debug",
         "z": "agrisense-alarm-flow",
-        "name": "⚠️ ALARM",
+        "name": "ALARM",
         "active": true,
         "tosidebar": true,
         "console": false,

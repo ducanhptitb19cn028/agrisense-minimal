@@ -46,7 +46,7 @@ A simplified IoT system for environmental monitoring using ESP32, Raspberry Pi, 
 ```bash
 # Install system packages
 sudo apt update
-sudo apt install -y bluetooth bluez mosquitto mosquitto-clients python3-pip sqlite3
+sudo apt install -y bluetooth bluez mosquitto mosquitto-clients python3-pip sqlite3 nodejs npm
 
 # Install Python dependencies
 pip3 install bleak paho-mqtt
@@ -73,7 +73,33 @@ nano cloud_sync.py  # Change CLOUD_BROKER to your OpenStack IP
 4. Configure device name and location
 5. Upload to ESP32
 
-### 3. Run the System
+### 3. Node-RED Dashboard Setup
+
+```bash
+# Install Node-RED
+sudo npm install -g --unsafe-perm node-red
+
+# Install dashboard nodes
+cd ~/.node-red
+npm install node-red-dashboard
+
+# Start Node-RED
+node-red
+```
+
+Access Node-RED at `http://localhost:1880`
+
+**Import the dashboard flow:**
+1. Open Node-RED editor (`http://localhost:1880`)
+2. Click menu (☰) → Import
+3. Select `nodered/dashboard_flow.json`
+4. Click Deploy
+
+**Access the dashboard:** `http://localhost:1880/ui`
+
+**📖 See [nodered/DASHBOARD_GUIDE.md](nodered/DASHBOARD_GUIDE.md) for detailed dashboard features and layout**
+
+### 4. Run the System
 
 ```bash
 # Terminal 1 - BLE Gateway
@@ -83,6 +109,9 @@ python3 ble_gateway.py
 # Terminal 2 - Cloud Sync
 cd ~/agrisense
 python3 cloud_sync.py
+
+# Terminal 3 - Node-RED (if not running as service)
+node-red
 ```
 
 **Databases are created automatically** - No manual setup needed!
@@ -141,17 +170,71 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
+### Create Node-RED Service
+
+```bash
+sudo nano /etc/systemd/system/nodered.service
+```
+
+Paste:
+```ini
+[Unit]
+Description=Node-RED
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/usr/bin/node-red
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ### Enable and Start Services
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable agrisense-ble agrisense-cloud
-sudo systemctl start agrisense-ble agrisense-cloud
+sudo systemctl enable agrisense-ble agrisense-cloud nodered
+sudo systemctl start agrisense-ble agrisense-cloud nodered
 
 # Check status
 sudo systemctl status agrisense-ble
 sudo systemctl status agrisense-cloud
+sudo systemctl status nodered
 ```
+
+---
+
+## Dashboard Features
+
+The Node-RED dashboard provides real-time visualization:
+
+### Current Readings
+- **Gauges** for all sensors (Temperature, Humidity, Soil, Light, Air Quality)
+- **Color-coded** indicators (green = normal, yellow = warning, red = critical)
+- **Device info** showing node ID, location, and last update time
+
+### Historical Trends
+- **Line charts** showing last hour of data for each sensor
+- **Multiple devices** can be tracked on same chart
+- **Auto-updating** in real-time as new data arrives
+
+### Alarm System
+- **Pop-up notifications** when thresholds are exceeded
+- **Alarm panel** showing active violations with details
+- **Status indicator** showing "All OK" or listing violations
+- **Thresholds:**
+  - Temperature: 15-35°C
+  - Humidity: 30-85%
+  - Light: 10-90%
+  - Soil Moisture: 20-80%
+  - Air Quality: 0-70 index
+
+**Access dashboard:** `http://YOUR_RPI_IP:1880/ui`
 
 ---
 
@@ -195,16 +278,19 @@ sqlite3 ~/agrisense/offline_queue.db "SELECT COUNT(*) FROM reading_queue WHERE s
 
 ```bash
 # Start
-sudo systemctl start agrisense-ble agrisense-cloud
+sudo systemctl start agrisense-ble agrisense-cloud nodered
 
 # Stop
-sudo systemctl stop agrisense-ble agrisense-cloud
+sudo systemctl stop agrisense-ble agrisense-cloud nodered
 
 # Restart
-sudo systemctl restart agrisense-ble agrisense-cloud
+sudo systemctl restart agrisense-ble agrisense-cloud nodered
 
 # Status
-sudo systemctl status agrisense-ble agrisense-cloud
+sudo systemctl status agrisense-ble agrisense-cloud nodered
+
+# View Node-RED logs
+sudo journalctl -u nodered -f
 ```
 
 ---
@@ -361,7 +447,9 @@ agrisense-minimal/
 │   ├── ble_gateway.py              # BLE to MQTT bridge
 │   └── cloud_sync.py               # Cloud sync (real-time)
 ├── nodered/
-│   └── alarm_flow.json             # Threshold monitoring
+│   ├── alarm_flow.json             # Basic alarm monitoring
+│   ├── dashboard_flow.json         # Full dashboard with visualization
+│   └── DASHBOARD_GUIDE.md          # Dashboard user guide
 └── README.md
 ```
 
@@ -386,7 +474,7 @@ agrisense-minimal/
 sudo systemctl status agrisense-*
 
 # View live logs
-sudo journalctl -u agrisense-ble -u agrisense-cloud -f
+sudo journalctl -u agrisense-ble -u agrisense-cloud -u nodered -f
 
 # Monitor MQTT
 mosquitto_sub -v -t "agrisense/#"
@@ -396,8 +484,12 @@ sqlite3 ~/agrisense/agrisense_data.db "SELECT COUNT(*) FROM sensor_readings;"
 
 # Test cloud
 python3 cloud_sync.py --test --cloud-ip YOUR_IP
+
+# Access dashboards
+# Node-RED editor: http://localhost:1880
+# Live dashboard:  http://localhost:1880/ui
 ```
 
 ---
 
-**System ready! All sensor data flows from ESP32 → Raspberry Pi → OpenStack Cloud in real-time.**
+**System ready! View real-time sensor data and alarms at `http://YOUR_RPI_IP:1880/ui`**

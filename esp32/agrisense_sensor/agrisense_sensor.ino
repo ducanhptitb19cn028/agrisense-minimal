@@ -79,7 +79,7 @@ class ServerCallbacks: public BLEServerCallbacks {
 
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
-        Serial.println("✗ Client disconnected");
+        Serial.println("Client disconnected");
         digitalWrite(LED_PIN, LOW);
         
         // Restart advertising
