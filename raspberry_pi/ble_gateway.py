@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 from bleak import BleakScanner, BleakClient
 import paho.mqtt.client as mqtt
+import sqlite3
 
 # ============== Configuration ==============
 
@@ -30,6 +31,9 @@ DATA_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
 MQTT_TOPIC = "agrisense/sensors/data"
+
+# Database Settings
+DB_FILE = "agrisense_data.db"
 
 # Scan Settings
 SCAN_INTERVAL = 5  # seconds between scans
@@ -63,6 +67,75 @@ def on_mqtt_disconnect(client, userdata, rc):
 mqtt_client.on_connect = on_mqtt_connect
 mqtt_client.on_disconnect = on_mqtt_disconnect
 
+# ============== Database ==============
+
+db_connection = None
+
+def init_database():
+    """Initialize SQLite database and create table if not exists"""
+    global db_connection
+    try:
+        db_connection = sqlite3.connect(DB_FILE, check_same_thread=False)
+        cursor = db_connection.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sensor_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                node_id TEXT,
+                location TEXT,
+                temperature REAL,
+                humidity REAL,
+                soil REAL,
+                soil_raw INTEGER,
+                light REAL,
+                light_raw INTEGER,
+                air_quality REAL,
+                air_raw INTEGER,
+                received_at TEXT
+            )
+        ''')
+
+        db_connection.commit()
+        logger.info(f"Database initialized: {DB_FILE}")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+
+def save_to_database(sensor_data):
+    """Save sensor data to SQLite database"""
+    if db_connection is None:
+        logger.warning("Database not initialized - data not saved")
+        return
+
+    try:
+        cursor = db_connection.cursor()
+
+        cursor.execute('''
+            INSERT INTO sensor_readings (
+                timestamp, node_id, location, temperature, humidity,
+                soil, soil_raw, light, light_raw, air_quality, air_raw, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            datetime.now().isoformat(),
+            sensor_data.get('node_id'),
+            sensor_data.get('location'),
+            sensor_data.get('temperature'),
+            sensor_data.get('humidity'),
+            sensor_data.get('soil'),
+            sensor_data.get('soil_raw'),
+            sensor_data.get('light'),
+            sensor_data.get('light_raw'),
+            sensor_data.get('air_quality'),
+            sensor_data.get('air_raw'),
+            sensor_data.get('received_at')
+        ))
+
+        db_connection.commit()
+
+    except Exception as e:
+        logger.error(f"Failed to save to database: {e}")
+
 # ============== BLE Gateway ==============
 
 connected_devices = {}
@@ -81,7 +154,10 @@ async def notification_handler(sender, data):
             for key, value in sensor_data['data'].items():
                 sensor_data[key] = value
             del sensor_data['data']
-        
+
+        # Save to SQLite database immediately
+        save_to_database(sensor_data)
+
         # Publish to MQTT
         if mqtt_connected:
             mqtt_client.publish(MQTT_TOPIC, json.dumps(sensor_data))
@@ -156,8 +232,12 @@ async def main():
     logger.info("=" * 50)
     logger.info(f"  MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
     logger.info(f"  MQTT Topic:  {MQTT_TOPIC}")
+    logger.info(f"  Database:    {DB_FILE}")
     logger.info("=" * 50)
-    
+
+    # Initialize database
+    init_database()
+
     # Connect to MQTT
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -178,7 +258,12 @@ async def main():
                 await client.disconnect()
             except:
                 pass
-        
+
+        # Close database connection
+        if db_connection:
+            db_connection.close()
+            logger.info("Database connection closed")
+
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
 
