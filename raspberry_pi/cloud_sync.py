@@ -327,7 +327,7 @@ class CloudSyncService:
         try:
             # Receive COMPLETE sensor payload from ESP32 (via BLE gateway)
             # Contains: node_id, location, temperature, humidity,
-            #           light, light_raw, soil, soil_raw, air_quality, air_raw
+            #           light, light_raw, soil, soil_raw, air_quality, air_ppm, air_raw
             payload = json.loads(msg.payload.decode())
             self.stats['readings_received'] += 1
 

@@ -91,7 +91,8 @@ def init_database():
                 light REAL,
                 light_raw INTEGER,
                 air_quality REAL,
-                air_raw INTEGER,
+                air_ppm REAL,
+                air_raw REAL,
                 received_at TEXT
             )
         ''')
@@ -114,8 +115,8 @@ def save_to_database(sensor_data):
         cursor.execute('''
             INSERT INTO sensor_readings (
                 timestamp, node_id, location, temperature, humidity,
-                soil, soil_raw, light, light_raw, air_quality, air_raw, received_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                soil, soil_raw, light, light_raw, air_quality, air_ppm, air_raw, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             datetime.now().isoformat(),
             sensor_data.get('node_id'),
@@ -127,6 +128,7 @@ def save_to_database(sensor_data):
             sensor_data.get('light'),
             sensor_data.get('light_raw'),
             sensor_data.get('air_quality'),
+            sensor_data.get('air_ppm'),
             sensor_data.get('air_raw'),
             sensor_data.get('received_at')
         ))
@@ -165,7 +167,8 @@ async def notification_handler(sender, data):
                        f"Temp: {sensor_data.get('temperature', 'N/A')}°C, "
                        f"Humidity: {sensor_data.get('humidity', 'N/A')}%, "
                        f"Soil: {sensor_data.get('soil', 'N/A')}%, "
-                       f"Light: {sensor_data.get('light', 'N/A')}%")
+                       f"Light: {sensor_data.get('light', 'N/A')}%, "
+                       f"Air: {sensor_data.get('air_quality', 'N/A')} ({sensor_data.get('air_ppm', 'N/A')} PPM)")
         else:
             logger.warning("MQTT not connected - data not published")
             

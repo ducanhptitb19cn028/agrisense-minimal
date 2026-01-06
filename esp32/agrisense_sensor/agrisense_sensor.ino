@@ -1,17 +1,18 @@
 /*
  * AgriSense ESP32 Multi-Sensor Node - BLE Version
- * 
+ *
  * Sensors:
  * - AHT20: Temperature & Humidity (I2C)
  * - MH-Series: Light intensity (Analog LDR)
  * - Capacitive: Soil moisture (Analog)
- * - Mikroe-1630 (MQ-135): Air quality (Analog)
- * 
+ * - Mikroe-1630 (MQ-135): Air quality (CO2 PPM via MQUnifiedsensor)
+ *
  * Communication: Bluetooth Low Energy (BLE)
- * 
+ *
  * Libraries Required:
  * - Adafruit AHTX0
  * - ArduinoJson
+ * - MQUnifiedsensor
  */
 
 #include <BLEDevice.h>
@@ -21,11 +22,12 @@
 #include <Wire.h>
 #include <Adafruit_AHTX0.h>
 #include <ArduinoJson.h>
+#include <MQUnifiedsensor.h>
 
 // ============== CONFIGURATION ==============
 
 // Device Identity - CHANGE FOR EACH NODE
-#define DEVICE_NAME "AgriSense-001"
+#define DEVICE_NAME "AgriSense-003"
 #define LOCATION "Greenhouse-A"
 
 // Pin Definitions
@@ -45,9 +47,12 @@
 #define SOIL_DRY 3500
 #define SOIL_WET 1500
 
-// Air quality: Higher ADC = more polluted
-#define AIR_CLEAN 100
-#define AIR_POLLUTED 1000
+// MQ-135 Configuration
+#define MQ135_BOARD "ESP32"
+#define MQ135_VOLTAGE_RESOLUTION 5
+#define MQ135_ADC_BIT_RESOLUTION 12  // ESP32 ADC is 12-bit (0-4095)
+#define MQ135_RATIO_CLEAN_AIR 3.6    // RS/R0 ratio in clean air
+#define MQ135_RL_VALUE 10            // Load resistance in kOhms
 
 // Reading interval
 #define READING_INTERVAL 5000  // 5 seconds
@@ -61,6 +66,9 @@
 
 Adafruit_AHTX0 aht;
 bool ahtFound = false;
+
+// MQ-135 Sensor Object
+MQUnifiedsensor MQ135(MQ135_BOARD, MQ135_VOLTAGE_RESOLUTION, MQ135_ADC_BIT_RESOLUTION, AIR_PIN, "MQ-135");
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pDataChar = NULL;
@@ -117,7 +125,28 @@ void setup() {
     } else {
         Serial.println("Not found");
     }
-    
+
+    // Initialise MQ-135 Air Quality Sensor
+    Serial.print("MQ-135 sensor: ");
+    MQ135.setRegressionMethod(1); // PPM = a*ratio^b
+    MQ135.setA(110.47);            // For CO2
+    MQ135.setB(-2.862);            // For CO2
+    MQ135.setR0(MQ135_RL_VALUE);   // Set load resistance
+
+    MQ135.init();
+
+    // Calibration (optional - uncomment if you want to calibrate in clean air)
+    // Serial.print("Calibrating MQ-135 (ensure clean air)... ");
+    // float calcR0 = 0;
+    // for(int i = 1; i <= 10; i++) {
+    //     MQ135.update();
+    //     calcR0 += MQ135.calibrate(MQ135_RATIO_CLEAN_AIR);
+    // }
+    // MQ135.setR0(calcR0/10);
+    // Serial.println("Done");
+
+    Serial.println("Initialized");
+
     // Initialise BLE
     Serial.print("BLE: ");
     BLEDevice::init(DEVICE_NAME);
@@ -200,12 +229,18 @@ void readAndBroadcast() {
     doc["soil"] = (int)soilPercent;
     doc["soil_raw"] = soilRaw;
     
-    // Read Air Quality (MQ-135)
-    int airRaw = analogRead(AIR_PIN);
-    float airIndex = map(constrain(airRaw, AIR_CLEAN, AIR_POLLUTED), 
-                         AIR_CLEAN, AIR_POLLUTED, 0, 100);
+    // Read Air Quality (MQ-135) using MQUnifiedsensor
+    MQ135.update();  // Update sensor readings
+    float co2_ppm = MQ135.readSensor();  // Read CO2 in PPM
+
+    // Convert PPM to air quality index (0-100)
+    // Good air: 400-1000 PPM CO2
+    // Poor air: 1000-5000 PPM CO2
+    float airIndex = map(constrain(co2_ppm, 400, 5000), 400, 5000, 0, 100);
+
     doc["air_quality"] = (int)airIndex;
-    doc["air_raw"] = airRaw;
+    doc["air_ppm"] = round(co2_ppm * 10) / 10.0;  // CO2 in PPM
+    doc["air_raw"] = MQ135.getVoltage();          // Voltage reading
     
     // Serialise to JSON
     String payload;
@@ -213,13 +248,15 @@ void readAndBroadcast() {
     
     // Print to Serial
     Serial.println("Sensor Reading:");
-    Serial.printf("   Temp: %.1f°C, Humidity: %.1f%%\n", 
-                  doc["temperature"].as<float>(), 
+    Serial.printf("   Temp: %.1f°C, Humidity: %.1f%%\n",
+                  doc["temperature"].as<float>(),
                   doc["humidity"].as<float>());
-    Serial.printf("   Light: %d%%, Soil: %d%%, Air: %d\n",
+    Serial.printf("   Light: %d%%, Soil: %d%%\n",
                   doc["light"].as<int>(),
-                  doc["soil"].as<int>(),
-                  doc["air_quality"].as<int>());
+                  doc["soil"].as<int>());
+    Serial.printf("   Air Quality: %d (CO2: %.1f PPM)\n",
+                  doc["air_quality"].as<int>(),
+                  doc["air_ppm"].as<float>());
     
     // Broadcast via BLE
     if (deviceConnected) {
